@@ -98,7 +98,6 @@ class Controller {
     
     init() {
         model.ready { model in
-            self.model = model
             model.beers.forEach { print($0.name, $0.description) }
         }
     }
@@ -207,7 +206,6 @@ class Controller {
     
     init() {
         model.ready { model in
-            self.model = model
             model.beers.forEach { print($0.name, $0.description) }
         }
     }
