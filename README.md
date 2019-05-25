@@ -1,4 +1,4 @@
-# Swift 4 Promises
+# Swift 4 Closures & Higher Order Functions, basic Promises
 ## Introduction
 Recently I had to write a model view controller program in Swift 4, that program was used to load data from a remote API,
 decode and store the data in a model. The view was strictly not allowed to know anything about the implementation of 
@@ -7,7 +7,7 @@ a popular approach was to use callbacks to handle the resolution of requests to 
 
 This guide will focus on fetching data. Fetching data introduces asynchronous operations into our code, handling this 
 specific problem requires some sort of callback mechanism so that the caller can be notified when the asynchronous job 
-is done. 
+is done. To do this we will be using the `Promise` pattern, this is similar to `Future` pattern.
 
 This guide is a small program that you can run in a Swift Playground. Through out this guide I will address the code in 
 logical sections being:
@@ -20,6 +20,11 @@ logical sections being:
 This guide will use the [Punk API](https://punkapi.com/documentation/v2) to pull JSON data into our program.
 
 The full code is located at the bottom of the article, you are welcome to skip straight to the code.
+
+### What this guide is not
+The code in guide is not a comprehensive `Promise` library like [PromiseKit](https://github.com/mxcl/PromiseKit). Nor 
+is it perfect and tested production code. The code does not attempt to provide all of the functionality of promises, 
+what we are aiming for is a succinct example of what a promise essentially _is_ and how they can benefit your code.
 ## Pre-requisites
 This guide is focused solving asynchronous operations using callbacks. This is considered to be an advanced topic, as 
 such it is required that readers should have an intermediate to advanced knowledge of programming to understand these 
@@ -36,10 +41,16 @@ up on closures if you don't already know about them. So if you don't know what c
 Since both the `Controller` and `Model` depend on the `Promise`, this guide will start by describing what a `Promise` 
 is. So let's get into it.
 ## What is a Promise
-The concept is simple, instead of the `Controller` relying on the `URLLoaderUtility` by registering a callback on the 
-`URLLoaderUtility` to be notified when the data is ready, we can obfuscate this operation by moving it into the `Model`.
-This makes sense since our `Controller` should be nice and small and should not know anything about how the data is 
-loaded from the remote API. Remember this was the brief.
+A `Promise` as the name suggests is a guarantee of sorts that the caller will be provided with something as a 
+placeholder in lieu of the final result. This is common for asynchronous operations. This is a basic `Promise`, by no 
+means is this comprehensive. Normally a `Promise` object should include methods for `.reject()`, `.defer()` and possibly
+more. Also promises are chainable which is something I have not coded in this guide. 
+
+Promises afford an easy to use paradigm for handling asynchronous requests. The concept is simple, instead of the 
+`Controller` relying on the `URLLoaderUtility` by registering a callback on the `URLLoaderUtility` to be notified when 
+the data is ready, we can obfuscate this operation by moving it into the `Model`. This makes sense since our 
+`Controller` should be nice and small and should not know anything about how the data is loaded from the remote API. 
+Remember this was the brief.
 
 But how can the `Controller` be notified if it does not know which class is loading the data? This is where the 
 `Promise` is useful. Returning a `Promise` from the `URLLoaderUtility` means we can use the inversion of control (IoC) 
@@ -50,35 +61,94 @@ program scales this trade off will be worth it.
 
 So what does the `Promise` actually do? Well the publisher will tell the `Promise` that the asynchronous task is 
 complete, where the subscriber being the `Model` is waiting to be notified of the task completion. So the `Promise` 
-works like a message broker.
+works like a message broker, or proxy for relaying actions between the publisher and subscriber.
 
-The `Model` calls the `.then()` method of the `Promise` - passing in methods for success and failure (error). When the 
+The `Model` calls the `.then()` method of the `Promise` - passing in a callback method for success and error. When the 
 asynchronous task is over it the `URLLoaderUtility` will determine if it was successful or not and call the appropriate 
-method that was passed from the `Model` to the `Promise` in the `.then()`. Both of these success and failure callbacks 
-passed into the `Promise` from the `Model` receive some context about the asynchronous HTTP operation, being the 
-headers and body of the request. From there the the `Model` can decide on what to do next. 
-
-This is a basic `Promise`, by no means is this comprehensive.
+method that was passed from the `Model` to the `Promise` in the `.then()` method. Both of these success and failure 
+callbacks passed into the `Promise` from the `Model` receive some context about the asynchronous HTTP operation, being 
+the headers and body of the request. From there the the `Model` can decide on what to do next. 
 ```
 class Promise {
     
-    var resolve: (URLResponse, Data) -> Void?
-    
-    var error: (URLResponse, Error) -> Void?
-    
-    init() {
-        self.resolve = { (urlResponse, data) in print("unhandled resolve") }
-        self.error = { (urlResponse, error) in print("unhandled error") }
+    var callback: (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()?
+
+    init(_ callback: @escaping (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
+        self.callback = callback
+    }
+
+    func then(_ resolve: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> Promise {
+        self.callback(resolve, error)
+        return self
+    }
+
+}
+```
+## What problem does Promise solve?
+Promises solve a few problems, the problems stem from asynchronous code that is executed within callbacks. These 
+problems are known as "callback hell" where an asynchronous request depends on the result of another asynchronous 
+request. This is common and may be unavoidable as an API consumer. When you have two fuctions that depend upon eachother 
+like this, you typically end up with some type of spaghetti code that includes a nested asynchronous function. In turn 
+the code will be difficult to read, difficult to change and all the while will likely have a lot of callback indenting 
+also referred to as the lesser known "triangle of doom" or "pyramid of doom". This can be illustrated with the following
+code.
+
+In this example we have an asynchronous request that depends on the resolution of another asynchronous request. In this 
+example we will be focusing on the `requestData` method. I want to point out the obvious problems of readability, 
+understandability, extensibility, all created because of the indentation or nesting of callbacks in the `requestData` 
+method. Remember that this is only two levels deep, we could exacerbate this problem by adding a few more nesting 
+callbacks. What if one of the callbacks fails, well in that instance we need to add some recovery code to try and 
+recover from the failure, probably also nested in here. What if the nesting was double the example that and you were 
+asked to change the inner most part or one of the mid to outer methods? Not fun. There must be an easier way. Well yes 
+there is and I promise to show you, the dad jokes are free.
+```
+func requestData(from: URL, _ callback: @escaping (Data?, Error?) -> ()) {
+    URLSession.shared.dataTask(with: from) { data, _, error in
+        if let error = error {
+            DispatchQueue.main.async { callback(nil, error) }
+            return
+        }
+        if let data = data {
+            DispatchQueue.main.async { callback(data, nil) }
+            return
+        }
+    }.resume()
+}
+
+var beersURL = URL(string: "https://api.punkapi.com/v2/beers")!
+
+requestData(from: beersURL) { (data, error) in
+    if let data = data {
+        do {
+            let beers = try JSONDecoder().decode([Beer].self, from: data)
+            if let beerURL = URL(string: "https://api.punkapi.com/v2/beers/\(beers[0].id)") {
+                requestData(from: beerURL) { (data, error) in
+                    if let data = data {
+                        do {
+                            let beer = try JSONDecoder().decode([Beer].self, from: data)
+                            print(beer)
+                        } catch {
+                            print("Could not decode beer JSON")
+                        }
+                    }
+                    
+                    if let error = error {
+                        print(error)
+                    }
+                }
+            }
+        } catch {
+            print("Could not decode beers JSON")
+        }
     }
     
-    func then(resolve: @escaping (URLResponse, Foundation.Data) -> Void, error: @escaping (URLResponse, Error) -> Void) {
-        self.resolve = resolve
-        self.error = error
+    if let error = error {
+        print(error)
     }
-    
 }
 ```
 ## What is `URLSession.shared.dataTask`
+[the `dataTask` method](https://developer.apple.com/documentation/foundation/urlsession/1411554-datatask)
 ## What is `DispatchQueue.main.async`
 ## What is `@escaping`
 ## The Struct
@@ -97,28 +167,28 @@ struct Beer: Decodable {
 The `Model` is 
 ```
 class Model {
-    
+
     let beersURL = URL(string: "https://api.punkapi.com/v2/beers")
-    
+
     var beers: [Beer] = [Beer]()
-    
+
     init() {}
-    
+
     func ready(callback: @escaping (Model, String?) -> Void) {
         if let url = beersURL {
-            URLLoaderUtility.fetchData(from: url).then(resolve: { (urlResponse, data) in
+            URLLoaderUtility.fetchData(from: url).then({ (response) in
                 do {
-                    self.beers = try JSONDecoder().decode([Beer].self, from: data)
+                    self.beers = try JSONDecoder().decode([Beer].self, from: response.data)
                     callback(self, nil)
                 } catch {
                     callback(self, "Could not decode JSON")
                 }
-            }, error: { (urlResponse, error) in
+            }, { (responseError) in
                 callback(self, "Call to remote API failed")
             })
         }
     }
-    
+
 }
 ```
 ## The Controller
@@ -133,9 +203,9 @@ finish. Upon completion we have the opportunity to handle the result in the view
 error we may show this to the user here. 
 ```
 class Controller {
-    
+
     var model: Model = Model()
-    
+
     init() {
         model.ready { (model, error) in
             if let error = error {
@@ -151,24 +221,22 @@ class Controller {
 The `URLLoaderUtility` 
 ```
 class URLLoaderUtility {
-    
+
     static func fetchData(from: URL) -> Promise {
-        let promise = Promise()
-        
-        URLSession.shared.dataTask(with: from) { data, urlResponse, error in
-            if let error = error, let urlResponse = urlResponse {
-                DispatchQueue.main.async { promise.error(urlResponse, error) }
-                return
-            }
-            if let data = data, let urlResponse = urlResponse {
-                DispatchQueue.main.async { promise.resolve(urlResponse, data) }
-                return
-            }
-        }.resume()
-        
-        return promise
+        return Promise({ (resolve: @escaping (Response) -> (), error: @escaping (ResponseError) -> ()) in
+            URLSession.shared.dataTask(with: from) { data, urlResponse, e in
+                if let e = e, let urlResponse = urlResponse {
+                    DispatchQueue.main.async { error(ResponseError(error: e, urlResponse: urlResponse)) }
+                    return
+                }
+                if let data = data, let urlResponse = urlResponse {
+                    DispatchQueue.main.async { resolve(Response(data: data, urlResponse: urlResponse)) }
+                    return
+                }
+            }.resume()
+        })
     }
-    
+
 }
 ```
 ## Full code
@@ -181,74 +249,79 @@ struct Beer: Decodable {
     var description: String
 }
 
+struct Response {
+    var data: Data
+    var urlResponse: URLResponse
+}
+
+struct ResponseError {
+    var error: Error
+    var urlResponse: URLResponse
+}
+
 class Promise {
     
-    var resolve: (URLResponse, Data) -> Void?
-    
-    var error: (URLResponse, Error) -> Void?
-    
-    init() {
-        self.resolve = { (urlResponse, data) in print("unhandled resolve") }
-        self.error = { (urlResponse, error) in print("unhandled error") }
+    var callback: (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()?
+
+    init(_ callback: @escaping (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
+        self.callback = callback
     }
-    
-    func then(resolve: @escaping (URLResponse, Foundation.Data) -> Void, error: @escaping (URLResponse, Error) -> Void) {
-        self.resolve = resolve
-        self.error = error
+
+    func then(_ resolve: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> Promise {
+        self.callback(resolve, error)
+        return self
     }
-    
+
 }
 
 class URLLoaderUtility {
-    
+
     static func fetchData(from: URL) -> Promise {
-        let promise = Promise()
-        
-        URLSession.shared.dataTask(with: from) { data, urlResponse, error in
-            if let error = error, let urlResponse = urlResponse {
-                DispatchQueue.main.async { promise.error(urlResponse, error) }
-                return
-            }
-            if let data = data, let urlResponse = urlResponse {
-                DispatchQueue.main.async { promise.resolve(urlResponse, data) }
-                return
-            }
-        }.resume()
-        
-        return promise
+        return Promise({ (resolve: @escaping (Response) -> (), error: @escaping (ResponseError) -> ()) in
+            URLSession.shared.dataTask(with: from) { data, urlResponse, e in
+                if let e = e, let urlResponse = urlResponse {
+                    DispatchQueue.main.async { error(ResponseError(error: e, urlResponse: urlResponse)) }
+                    return
+                }
+                if let data = data, let urlResponse = urlResponse {
+                    DispatchQueue.main.async { resolve(Response(data: data, urlResponse: urlResponse)) }
+                    return
+                }
+            }.resume()
+        })
     }
-    
+
 }
 
 class Model {
-    
+
     let beersURL = URL(string: "https://api.punkapi.com/v2/beers")
-    
+
     var beers: [Beer] = [Beer]()
-    
+
     init() {}
-    
+
     func ready(callback: @escaping (Model, String?) -> Void) {
         if let url = beersURL {
-            URLLoaderUtility.fetchData(from: url).then(resolve: { (urlResponse, data) in
+            URLLoaderUtility.fetchData(from: url).then({ (response) in
                 do {
-                    self.beers = try JSONDecoder().decode([Beer].self, from: data)
+                    self.beers = try JSONDecoder().decode([Beer].self, from: response.data)
                     callback(self, nil)
                 } catch {
                     callback(self, "Could not decode JSON")
                 }
-            }, error: { (urlResponse, error) in
+            }, { (responseError) in
                 callback(self, "Call to remote API failed")
             })
         }
     }
-    
+
 }
 
 class Controller {
-    
+
     var model: Model = Model()
-    
+
     init() {
         model.ready { (model, error) in
             if let error = error {
@@ -261,4 +334,5 @@ class Controller {
 }
 
 let controller = Controller()
+
 ```
