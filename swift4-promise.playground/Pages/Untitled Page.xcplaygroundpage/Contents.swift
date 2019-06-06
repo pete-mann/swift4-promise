@@ -28,13 +28,13 @@ class Promise {
 
     var singleAsyncOp: ((_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
     
-    var multiAsyncOp: ((_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
+    var multiAsyncOp: ((_ response: @escaping ([Response]) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
     
     init(_ callback: @escaping (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
         self.singleAsyncOp = callback
     }
     
-    init(_ callback: @escaping (_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
+    init(_ callback: @escaping (_ response: @escaping ([Response]) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
         self.multiAsyncOp = callback
     }
 
@@ -44,7 +44,7 @@ class Promise {
         }
     }
     
-    func then(_ onResolve: @escaping (Responses) -> (), _ onError: @escaping (ResponseError) -> ()) {
+    func then(_ onResolve: @escaping ([Response]) -> (), _ onError: @escaping (ResponseError) -> ()) {
         if let multiAsyncOp = self.multiAsyncOp {
             multiAsyncOp(onResolve, onError)
         }
@@ -52,18 +52,18 @@ class Promise {
 
     static func all(_ promises: Promise ...) -> Promise {
         
-        let outerPromise = Promise({ (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in
+        let outerPromise = Promise({ (resolve: @escaping ([Response]) -> (), error: @escaping (ResponseError) -> ()) in
             var resolutions = [Int : Response]()
             
             promises.enumerated().forEach { tuple in
                 tuple.element.then({ (response: Response) -> () in
                     resolutions[tuple.offset] = response
                     if(resolutions.count == promises.count) {
-                        resolve(Responses(responses: resolutions.sorted(by: { l, r in
+                        resolve(resolutions.sorted(by: { l, r in
                             l.key < r.key
                         }).map { (element) -> Response in
                             element.value
-                        }))
+                        })
                     }
                 }, { (responseError: ResponseError) -> () in
                     error(responseError)
@@ -140,17 +140,17 @@ class Model {
     
     var page: Int = 1
 
-    func ready(callback: @escaping (BeerModel, String?) -> Void) {
+    func ready(callback: @escaping (Model, String?) -> Void) {
         self.favouritesById.append(FavouriteBeer(id: 99))
         self.favouritesById.append(FavouriteBeer(id: 100))
         
         Promise.all(
             HTTPService.getBeers(page: self.page, name: nil, abv: nil),
             HTTPService.getFavouriteBeers(ids: getFavouriteIds())
-        ).then({ (responses: Responses) in
+        ).then({ (responses: [Response]) in
             do {
-                self.beers = try JSONDecoder().decode([Beer].self, from: responses.responses[0].data)
-                self.favouriteBeers = try JSONDecoder().decode([Beer].self, from: responses.responses[1].data)
+                self.beers = try JSONDecoder().decode([Beer].self, from: responses[0].data)
+                self.favouriteBeers = try JSONDecoder().decode([Beer].self, from: responses[1].data)
                 callback(self, nil)
             } catch {
                 callback(self, "Could not decode JSON")
