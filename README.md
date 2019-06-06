@@ -269,10 +269,10 @@ error we may show this to the user here.
 ```
 class Controller {
 
-    var beerModel: BeerModel = BeerModel()
+    var model: Model = Model()
 
     init() {
-        beerModel.ready { (model, error) in
+        model.ready { (model, error) in
             if let error = error {
                 print(error)
             } else {
