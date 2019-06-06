@@ -69,59 +69,69 @@ method that was passed from the `Model` to the `Promise` in the `.then()` method
 callbacks passed into the `Promise` from the `Model` receive some context about the asynchronous HTTP operation, being 
 the headers and body of the request. From there the the `Model` can decide on what to do next. 
 ```
+struct Response {
+    var data: Data
+    var urlResponse: URLResponse
+}
+
+struct Responses {
+    var responses: [Response]
+}
+
+struct ResponseError {
+    var error: Error
+    var urlResponse: URLResponse
+}
+
 class Promise {
 
-    var callback: (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()
+    var singleAsyncOp: ((_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
     
-    var callback2: (_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ()
-
+    var multiAsyncOp: ((_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
+    
     init(_ callback: @escaping (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
-        self.callback = callback
-        self.callback2 = { (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in print("Unhandled responses") }
+        self.singleAsyncOp = callback
     }
     
-    
     init(_ callback: @escaping (_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
-        self.callback2 = callback
-        self.callback = { (resolve: @escaping (Response) -> (), error: @escaping (ResponseError) -> ()) in print("Unhandled response") }
+        self.multiAsyncOp = callback
     }
 
     func then(_ onResolve: @escaping (Response) -> (), _ onError: @escaping (ResponseError) -> ()) {
-        self.callback(onResolve, onError)
+        if let callback = self.singleAsyncOp {
+            callback(onResolve, onError)
+        }
     }
     
-    
     func then(_ onResolve: @escaping (Responses) -> (), _ onError: @escaping (ResponseError) -> ()) {
-        self.callback2(onResolve, onError)
+        if let multiAsyncOp = self.multiAsyncOp {
+            multiAsyncOp(onResolve, onError)
+        }
     }
 
     static func all(_ promises: Promise ...) -> Promise {
         
-        let promise = Promise({ (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in
+        let outerPromise = Promise({ (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in
+            var resolutions = [Int : Response]()
             
-            var resolutions = [Response]()
-            
-            var resolvedCount = 0
-            
-            let resolveCB = { (response: Response) -> () in
-                resolvedCount += 1
-                resolutions.append(response)
-                
-                if(resolvedCount == promises.count) {
-                    resolve(Responses(data: resolutions))
-                }
-                
+            promises.enumerated().forEach { tuple in
+                tuple.element.then({ (response: Response) -> () in
+                    resolutions[tuple.offset] = response
+                    if(resolutions.count == promises.count) {
+                        resolve(Responses(responses: resolutions.sorted(by: { l, r in
+                            l.key < r.key
+                        }).map { (element) -> Response in
+                            element.value
+                        }))
+                    }
+                }, { (responseError: ResponseError) -> () in
+                    error(responseError)
+                })
             }
             
-            let errorCB = { (responseError: ResponseError) -> () in
-                error(responseError)
-            }
-            
-            
-            promises.forEach { promise in promise.then(resolveCB, errorCB) }
         })
         
-        return promise
+        return outerPromise
     }
 
 }
@@ -199,43 +209,52 @@ want to decode an array of these objects, and to do that we need a `Struct`. It'
 properties. However the data from the API is much more extensive, we're only concerned with getting some basic 
 data for the purpose of an example.
 ```
-struct Beer: Decodable {
+struct FavouriteBeer: Codable {
     var id: Int
-    var name: String
-    var description: String
+}
+
+struct Beer: Codable {
+    let id: Int
+    let name: String
+    let tagline: String
 }
 ```
 ## The Model
 The `Model` is 
 ```
 class Model {
-
-    let beersURL = URL(string: "https://api.punkapi.com/v2/beers")
-
+    
     var beers: [Beer] = [Beer]()
+    
+    var favouriteBeers: [Beer] = [Beer]()
+    
+    var favouritesById: [FavouriteBeer] = [FavouriteBeer]()
+    
+    var page: Int = 1
 
-    func ready(callback: @escaping (Model, String?) -> Void) {
-        if let url = beersURL {
-            URLLoaderUtility.fetchData(from: url).then({ (response: Response) in
-                do {
-                    self.beers = try JSONDecoder().decode([Beer].self, from: response.data)
-                    callback(self, nil)
-                } catch {
-                    callback(self, "Could not decode JSON")
-                }
-            }, { (responseError) in
-                callback(self, "Call to remote API failed")
-            })
-        }
+    func ready(callback: @escaping (BeerModel, String?) -> Void) {
+        self.favouritesById.append(FavouriteBeer(id: 99))
+        self.favouritesById.append(FavouriteBeer(id: 100))
+        
+        Promise.all(
+            HTTPService.getBeers(page: self.page, name: nil, abv: nil),
+            HTTPService.getFavouriteBeers(ids: getFavouriteIds())
+        ).then({ (responses: Responses) in
+            do {
+                self.beers = try JSONDecoder().decode([Beer].self, from: responses.responses[0].data)
+                self.favouriteBeers = try JSONDecoder().decode([Beer].self, from: responses.responses[1].data)
+                callback(self, nil)
+            } catch {
+                callback(self, "Could not decode JSON")
+            }
+        }, { (responseError) in
+            callback(self, "Call to remote API failed")
+        })
     }
     
-    func test() {
-        if let url = beersURL {
-            Promise.all(URLLoaderUtility.fetchData(from: url), URLLoaderUtility.fetchData(from: url)).then({ (response: Responses) in
-                print(response)
-            }, {error in
-                
-            })
+    func getFavouriteIds() -> String {
+        return self.favouritesById.reduce("") { (accumulator: String, current: FavouriteBeer) -> String in
+            return (accumulator == "") ? "\(current.id)" : "\(accumulator)|\(current.id)"
         }
     }
 
@@ -254,18 +273,23 @@ error we may show this to the user here.
 ```
 class Controller {
 
-    var model: Model = Model()
+    var beerModel: BeerModel = BeerModel()
 
     init() {
-        model.ready { (model, error) in
+        beerModel.ready { (model, error) in
             if let error = error {
                 print(error)
             } else {
-                model.beers.forEach { print($0.name, $0.description) }
-                model.test()
+                model.favouriteBeers.forEach {
+                    beer in print(beer.id)
+                }
+                model.beers.forEach {
+                    beer in print(beer.id)
+                }
             }
         }
     }
+    
 }
 ```
 ## The Loader Utility
@@ -284,7 +308,7 @@ class URLLoaderUtility {
                     DispatchQueue.main.async { resolve(Response(data: data, urlResponse: urlResponse)) }
                     return
                 }
-                }.resume()
+            }.resume()
         })
     }
 
@@ -294,10 +318,14 @@ class URLLoaderUtility {
 ```
 import Foundation
 
-struct Beer: Decodable {
+struct FavouriteBeer: Codable {
     var id: Int
-    var name: String
-    var description: String
+}
+
+struct Beer: Codable {
+    let id: Int
+    let name: String
+    let tagline: String
 }
 
 struct Response {
@@ -306,7 +334,7 @@ struct Response {
 }
 
 struct Responses {
-    var data: [Response]
+    var responses: [Response]
 }
 
 struct ResponseError {
@@ -316,57 +344,53 @@ struct ResponseError {
 
 class Promise {
 
-    var callback: (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()
+    var singleAsyncOp: ((_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
     
-    var callback2: (_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ()
-
+    var multiAsyncOp: ((_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ())?
+    
     init(_ callback: @escaping (_ response: @escaping (Response) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
-        self.callback = callback
-        self.callback2 = { (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in print("Unhandled responses") }
+        self.singleAsyncOp = callback
     }
     
-    
     init(_ callback: @escaping (_ response: @escaping (Responses) -> (), _ error: @escaping (ResponseError) -> ()) -> ()) {
-        self.callback2 = callback
-        self.callback = { (resolve: @escaping (Response) -> (), error: @escaping (ResponseError) -> ()) in print("Unhandled response") }
+        self.multiAsyncOp = callback
     }
 
     func then(_ onResolve: @escaping (Response) -> (), _ onError: @escaping (ResponseError) -> ()) {
-        self.callback(onResolve, onError)
+        if let callback = self.singleAsyncOp {
+            callback(onResolve, onError)
+        }
     }
     
-    
     func then(_ onResolve: @escaping (Responses) -> (), _ onError: @escaping (ResponseError) -> ()) {
-        self.callback2(onResolve, onError)
+        if let multiAsyncOp = self.multiAsyncOp {
+            multiAsyncOp(onResolve, onError)
+        }
     }
 
     static func all(_ promises: Promise ...) -> Promise {
         
-        let promise = Promise({ (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in
+        let outerPromise = Promise({ (resolve: @escaping (Responses) -> (), error: @escaping (ResponseError) -> ()) in
+            var resolutions = [Int : Response]()
             
-            var resolutions = [Response]()
-            
-            var resolvedCount = 0
-            
-            let resolveCB = { (response: Response) -> () in
-                resolvedCount += 1
-                resolutions.append(response)
-                
-                if(resolvedCount == promises.count) {
-                    resolve(Responses(data: resolutions))
-                }
-                
+            promises.enumerated().forEach { tuple in
+                tuple.element.then({ (response: Response) -> () in
+                    resolutions[tuple.offset] = response
+                    if(resolutions.count == promises.count) {
+                        resolve(Responses(responses: resolutions.sorted(by: { l, r in
+                            l.key < r.key
+                        }).map { (element) -> Response in
+                            element.value
+                        }))
+                    }
+                }, { (responseError: ResponseError) -> () in
+                    error(responseError)
+                })
             }
             
-            let errorCB = { (responseError: ResponseError) -> () in
-                error(responseError)
-            }
-            
-            
-            promises.forEach { promise in promise.then(resolveCB, errorCB) }
         })
         
-        return promise
+        return outerPromise
     }
 
 }
@@ -384,40 +408,79 @@ class URLLoaderUtility {
                     DispatchQueue.main.async { resolve(Response(data: data, urlResponse: urlResponse)) }
                     return
                 }
-                }.resume()
+            }.resume()
         })
     }
 
 }
 
-class Model {
-
-    let beersURL = URL(string: "https://api.punkapi.com/v2/beers")
-
-    var beers: [Beer] = [Beer]()
-
-    func ready(callback: @escaping (Model, String?) -> Void) {
-        if let url = beersURL {
-            URLLoaderUtility.fetchData(from: url).then({ (response: Response) in
-                do {
-                    self.beers = try JSONDecoder().decode([Beer].self, from: response.data)
-                    callback(self, nil)
-                } catch {
-                    callback(self, "Could not decode JSON")
-                }
-            }, { (responseError) in
-                callback(self, "Call to remote API failed")
-            })
+class HTTPService {
+    
+    static let PUNKAPI: String = "https://api.punkapi.com/v2/beers"
+    
+    static func getBeers(page: Int, name: String?, abv: Double?) -> Promise {
+        var nameQuery = ""
+        var ABVQuery = ""
+        if let name = name {
+            nameQuery = "&beer_name=\(name)"
+            nameQuery.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+        }
+        if let abv = abv {
+            ABVQuery = "&abv_gt=\(abv)&abv_lt=\(abv)"
+        }
+        if let url = URL(string: "\(self.PUNKAPI)?per_page=80\(nameQuery)\(ABVQuery)") {
+            return URLLoaderUtility.fetchData(from: url)
+        } else {
+            fatalError("Can not create getBeers URL")
         }
     }
     
-    func test() {
-        if let url = beersURL {
-            Promise.all(URLLoaderUtility.fetchData(from: url), URLLoaderUtility.fetchData(from: url)).then({ (response: Responses) in
-                print(response)
-            }, {error in
-                
-            })
+    static func getFavouriteBeers(ids: String) -> Promise {
+        let urlString = "\(self.PUNKAPI)?ids=\(ids)".addingPercentEncoding(withAllowedCharacters:NSCharacterSet.urlQueryAllowed)
+        if let urlString = urlString,
+            let url = URL(string: urlString) {
+            return URLLoaderUtility.fetchData(from: url)
+        } else {
+            fatalError("Can not create getFavouriteBeers URL")
+        }
+        
+    }
+    
+}
+
+class Model {
+    
+    var beers: [Beer] = [Beer]()
+    
+    var favouriteBeers: [Beer] = [Beer]()
+    
+    var favouritesById: [FavouriteBeer] = [FavouriteBeer]()
+    
+    var page: Int = 1
+
+    func ready(callback: @escaping (BeerModel, String?) -> Void) {
+        self.favouritesById.append(FavouriteBeer(id: 99))
+        self.favouritesById.append(FavouriteBeer(id: 100))
+        
+        Promise.all(
+            HTTPService.getBeers(page: self.page, name: nil, abv: nil),
+            HTTPService.getFavouriteBeers(ids: getFavouriteIds())
+        ).then({ (responses: Responses) in
+            do {
+                self.beers = try JSONDecoder().decode([Beer].self, from: responses.responses[0].data)
+                self.favouriteBeers = try JSONDecoder().decode([Beer].self, from: responses.responses[1].data)
+                callback(self, nil)
+            } catch {
+                callback(self, "Could not decode JSON")
+            }
+        }, { (responseError) in
+            callback(self, "Call to remote API failed")
+        })
+    }
+    
+    func getFavouriteIds() -> String {
+        return self.favouritesById.reduce("") { (accumulator: String, current: FavouriteBeer) -> String in
+            return (accumulator == "") ? "\(current.id)" : "\(accumulator)|\(current.id)"
         }
     }
 
@@ -432,13 +495,17 @@ class Controller {
             if let error = error {
                 print(error)
             } else {
-                model.beers.forEach { print($0.name, $0.description) }
-                model.test()
+                model.favouriteBeers.forEach {
+                    beer in print(beer.id)
+                }
+                model.beers.forEach {
+                    beer in print(beer.id)
+                }
             }
         }
     }
+    
 }
 
 let controller = Controller()
-
 ```
